@@ -10,8 +10,10 @@
 #   ./build.sh --cli        only the CLI
 #   ./build.sh --app        only the app
 #   ./build.sh --clean      remove what the build wrote
+#   ./build.sh --release    build, then publish it as a GitHub release
 #
-# `make` is this with shorter names; see the Makefile.
+# `make` is this with shorter names; see the Makefile. `--release` hands over to
+# release.sh, which does the publishing and has its own manual: ./release.sh -h
 #
 # The CLI needs python3 and a scrcpy release. The app needs a Go toolchain;
 # desk-gui/build.sh explains what it does with it. Both look for the release
@@ -39,6 +41,7 @@ for arg in "$@"; do
 	--test) mode=test ;;
 	--docs) mode=docs ;;
 	--clean) mode=clean ;;
+	--release) exec ./release.sh ;;
 	--cli) want_app=no ;;
 	--app) want_cli=no ;;
 	-h | --help)

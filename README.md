@@ -82,6 +82,7 @@ From a clone of this repository:
 ./build.sh --test       # gofmt, vet, the Go tests, mygo vet, the CLI itself
 ./build.sh --docs       # redraw the pictures in these READMEs
 ./build.sh --clean      # remove what the build wrote
+./build.sh --release    # build, then publish it as a GitHub release
 ```
 
 `make` is the same script under shorter names: `make`, `make install`,
@@ -125,6 +126,25 @@ revision at the top of the log, the app is behind:
 git log -1 --format=%H        # what the sources say
 make install                  # rebuild and put it there
 ```
+
+### Publishing a release
+
+`--release` — or `./release.sh`, or `make release` — publishes the version in
+`desk-gui/mygo.json`: it builds, tags `v<version>` at the commit it built from,
+creates the release and attaches the disk image, then downloads that image back
+to check it is really there and complete.
+
+It refuses to run on a tree with uncommitted changes, or a commit that is not
+pushed, because the app records the revision it was built from: a release has to
+point at source everyone can get, and the image has to be the one that commit
+produces. A version is published once — bump `version` to release again — and
+re-running is safe, since a tag or a release that already exists is picked up
+rather than made twice. `./release.sh --dry-run` checks everything and publishes
+nothing.
+
+The credential is the one git already uses for this repository: the token comes
+from the keychain through `git credential fill`, and is never written to disk or
+put on a command line.
 
 ---
 
