@@ -26,6 +26,9 @@ surfaces instead.
 open build/darwin-arm64 # then drag Desk onto Applications from the .dmg
 ```
 
+Or don't build it at all: the newest `Desk.dmg` is attached to the
+[releases](../../releases/latest) — drag `Desk` onto Applications from that.
+
 `build.sh` draws the icon, copies the `adb` and `scrcpy` it drives into the
 bundle, and hands the whole thing to `mygo build`, which signs it and writes a
 disk image whose window invites dragging `Desk.app` onto `Applications`. The

@@ -29,6 +29,9 @@ thing reads as one desktop.
 ./build.sh --install    # ... and copy it into /Applications
 ```
 
+Or don't build it at all: the newest `Desk.dmg` is attached to the
+[releases](../../releases/latest), ready to drag onto Applications.
+
 It needs nothing else installed: `adb` and `scrcpy` ship inside the bundle. See
 [desk-gui/README.md](desk-gui/README.md) for using it, and the `desk` CLI below
 for scripting the same thing.
