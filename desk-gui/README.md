@@ -38,6 +38,10 @@ To install without the disk image:
 ./build.sh --install    # also copies Desk.app into /Applications
 ```
 
+The `build.sh` at the root of the repository does this and the `desk` CLI
+together, and takes the same flags (`make install`). This one is for the app on
+its own, which is all it takes: the script's header comment is its manual.
+
 On the phone, once: **Settings → About phone → tap Build number seven times**,
 then **Developer options → USB debugging** on, and plug it in. Accept the
 "Allow USB debugging" prompt from your Mac.
@@ -215,3 +219,6 @@ in general are fine.
 The [notes at the root](../README.md) list the dead ends that led here: Ready
 For's signature-protected permission, Motorola's disabled desktop components,
 and why macOS cannot be a Miracast sink.
+
+Desk is free software under the [GPL-3.0](../LICENSE): use it, change it, pass it
+on — and whatever you build from it stays free too.

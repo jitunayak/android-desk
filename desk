@@ -21,7 +21,10 @@ import subprocess
 import sys
 import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# realpath, not abspath: installed as a symlink (see build.sh) the CLI's state
+# and its ./bin belong to the checkout the link points at, not to the folder
+# the link happens to sit in.
+HERE = os.path.dirname(os.path.realpath(__file__))
 STATE_DIR = os.path.join(HERE, ".desk")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
 APPS_FILE = os.path.join(STATE_DIR, "apps.json")

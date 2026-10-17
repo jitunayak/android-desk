@@ -25,7 +25,6 @@ thing reads as one desktop.
 ![Desk: the glass bar with the app drawer over the phone's desktop](desk-gui/docs/glass.png)
 
 ```sh
-cd desk-gui
 ./build.sh              # Desk.app and Desk.dmg, with adb and scrcpy inside
 ./build.sh --install    # ... and copy it into /Applications
 ```
@@ -67,6 +66,39 @@ window mode and you get a desktop.
   (`desk doctor` checks this)
 
 Run **`desk doctor`** first — it validates every prerequisite above.
+
+---
+
+## Building
+
+From a clone of this repository:
+
+```sh
+./build.sh              # the CLI, plus Desk.app and Desk.dmg in desk-gui/build
+./build.sh --install    # ... and install it: /Applications/Desk.app, `desk` on PATH
+./build.sh --test       # gofmt, vet, the Go tests, mygo vet, the CLI itself
+./build.sh --docs       # redraw the pictures in these READMEs
+./build.sh --clean      # remove what the build wrote
+```
+
+`make` is the same script under shorter names: `make`, `make install`,
+`make test`, `make docs`, `make clean`, `make help`.
+
+Neither half needs anything installed but `python3`, and a Go toolchain for the
+app. Both find the scrcpy release the way `desk` itself does —
+`$DESK_SCRCPY_DIR`, then `./bin`, then the newest `~/Downloads/scrcpy-macos-*` —
+and the build copies `adb`, `scrcpy` and `scrcpy-server` into `bin/`, so the CLI
+in the checkout runs with nothing on `PATH`:
+
+```sh
+./build.sh
+./desk doctor
+```
+
+`--install` links `desk` into `~/.local/bin` as a symlink to this checkout, so it
+keeps reading the same `bin/` and writing the same `.desk/` state; it says so if
+that folder is not on your `PATH` yet. Set `GO` or `DESK_BIN_DIR` to build with a
+different Go, or install the CLI somewhere else.
 
 ---
 
@@ -168,3 +200,18 @@ desk shot ~/Desktop/desk.png                 # grab a frame
 desk key back                                # or use right-click in scrcpy
 desk stop                                    # done
 ```
+
+---
+
+## Licence
+
+Desk is free software under the **GNU General Public License, version 3**
+([LICENSE](LICENSE)).
+
+In plain words: use it, change it, hand it to other people — but not as
+something closed. Anyone who ships a modified Desk has to ship its source under
+the same terms, so nothing built on this can be locked up. (Selling copies is
+allowed; the licence cannot forbid that. But since every buyer is entitled to the
+source too, a paywall would buy them nothing.)
+
+It comes with no warranty.

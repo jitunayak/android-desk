@@ -11,6 +11,9 @@ desk-gui/build/
 desk-gui/resources/darwin/bin/
 *.dmg
 
+# adb and scrcpy, copied in for the CLI by ./build.sh.
+/bin/
+
 # `go build` with no -o writes the module's name into its own directory.
 desk-gui/desk
 
