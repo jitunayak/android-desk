@@ -100,6 +100,29 @@ keeps reading the same `bin/` and writing the same `.desk/` state; it says so if
 that folder is not on your `PATH` yet. Set `GO` or `DESK_BIN_DIR` to build with a
 different Go, or install the CLI somewhere else.
 
+### Keeping the app in /Applications current
+
+`--install` is also the way to keep the copy in `/Applications` the build you
+just made. Re-run it after a change rather than comparing the two by eye. Go
+writes the revision it built from into the binary, so two builds of identical
+sources still differ once the revision or the uncommitted-changes flag differs —
+an app that looks the same by eye can be an older build.
+
+The installed app can say which commit it came from, with nothing but `grep`:
+
+```sh
+grep -ao 'vcs\.revision=[0-9a-f]*' /Applications/Desk.app/Contents/MacOS/Desk
+```
+
+That prints the commit the app was built from. (`go version -m` on the same file
+says the same thing with more detail, if Go is on your `PATH`.) If it is not the
+revision at the top of the log, the app is behind:
+
+```sh
+git log -1 --format=%H        # what the sources say
+make install                  # rebuild and put it there
+```
+
 ---
 
 ## Commands

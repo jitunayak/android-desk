@@ -42,6 +42,19 @@ The `build.sh` at the root of the repository does this and the `desk` CLI
 together, and takes the same flags (`make install`). This one is for the app on
 its own, which is all it takes: the script's header comment is its manual.
 
+Installing is also how the copy in `/Applications` is kept current, and it is
+worth re-running rather than judging by eye: Go records the revision it built
+from in the binary, so two builds of identical sources still differ once the
+revision or the uncommitted-changes flag does. Ask the installed app which
+commit it came from:
+
+```sh
+grep -ao 'vcs\.revision=[0-9a-f]*' /Applications/Desk.app/Contents/MacOS/Desk
+```
+
+Rebuild (`./build.sh --install`, or `make install` from the root) if that is not
+the revision at the top of `git log`.
+
 On the phone, once: **Settings → About phone → tap Build number seven times**,
 then **Developer options → USB debugging** on, and plug it in. Accept the
 "Allow USB debugging" prompt from your Mac.
