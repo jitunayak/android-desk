@@ -73,8 +73,15 @@ if [ "$head" != "$(git rev-parse FETCH_HEAD)" ]; then
        Push it first — the tag has to point at something GitHub has."
 fi
 
-slug="$(git remote get-url origin | sed -e 's|^.*github\.com[:/]||' -e 's|\.git$||')"
-[ -n "$slug" ] || die "could not tell which repository origin is"
+origin_url="$(git remote get-url origin)"
+slug="$(printf '%s\n' "$origin_url" | sed -e 's|^.*github\.com[:/]||' -e 's|\.git$||')"
+case "$slug" in
+*/*) ;;
+*) die "origin is not a GitHub repository ($origin_url), so there is nowhere to publish" ;;
+esac
+case "$slug" in
+*/*/* | *:*) die "origin is not a GitHub repository ($origin_url), so there is nowhere to publish" ;;
+esac
 echo "    $head on $branch, clean"
 echo "    repository $slug"
 
@@ -126,10 +133,14 @@ fi
 
 # The disk image mygo writes, and the name it gets on GitHub.
 dmg="$(ls -t desk-gui/build/*/*"$version"*.dmg 2>/dev/null | head -1 || true)"
-[ -n "$dmg" ] && [ "$dry" = no ] || dmg=""
+
 if [ "$dry" = yes ]; then
 	echo "==> would build, tag $tag, and publish"
-	echo "    image    Desk-$version-<arch>.dmg, built from the sources above"
+	if [ -n "$dmg" ]; then
+		echo "    image    $(basename "$dmg"), from the last build"
+	else
+		echo "    image    a fresh disk image for $version"
+	fi
 	echo "    release  $tag on $slug"
 	echo
 	echo "Nothing was published. Run ./release.sh to do it."

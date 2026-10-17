@@ -205,6 +205,10 @@ go tool mygo vet .               # vet, and check native UI build lifetimes
 go run ./cmd/mkicon -o resources/icon.png   # redraw the icon
 ```
 
+A change worth shipping is released from the repository root: `./release.sh`
+builds the app, tags the commit it was built from, and puts the disk image on the
+releases page. The root README has the details.
+
 ## Troubleshooting
 
 **"no device connected"** — `adb devices` while the app is closed. It must list
