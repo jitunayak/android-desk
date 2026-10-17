@@ -84,10 +84,11 @@ token="$(printf '%s\n' "$cred" | sed -n 's/^password=//p')"
 [ -n "$token" ] || die "no GitHub credential for github.com. Push once by hand and
        let git save it to the keychain, then run this again."
 
-# curl reads its options from stdin, so the token stays out of `ps`.
+# curl reads its options from stdin, so the token stays out of `ps`. No Accept
+# header: the API's default is JSON, and setting one here would fight with the
+# `Accept: application/octet-stream` the asset download needs.
 api() {
-	printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/vnd.github+json"\n' \
-		"$token" | curl -sS --config - "$@"
+	printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -sS --config - "$@"
 }
 
 code="$(api -o "$tmp/me.json" -w '%{http_code}' https://api.github.com/user)"
@@ -232,14 +233,35 @@ esac
 # ------------------------------------------------------------- the check
 
 url="$(json_field "$tmp/asset.json" browser_download_url)"
+created="$(json_field "$tmp/created.json" html_url)"
 uploaded="$(json_field "$tmp/asset.json" size)"
 local="$(wc -c <"$dmg" | tr -d ' ')"
-[ "$uploaded" = "$local" ] || die "the uploaded image is $uploaded bytes, the local one $local"
-code="$(curl -sIL -o /dev/null -w '%{http_code}' "$url")"
-[ "$code" = 200 ] || die "the uploaded image does not download (http $code)"
+[ "$uploaded" = "$local" ] || die "GitHub has $uploaded bytes, the image is $local.
+       The release was created: $created"
+
+# Take the image back and compare it with the one that was built. The API
+# serves assets in both public and private repositories; it answers with a
+# redirect to the file itself, which curl follows without the token.
+code="$(api -L -H 'Accept: application/octet-stream' -o "$tmp/served.dmg" -w '%{http_code}' \
+	"https://api.github.com/repos/$slug/releases/assets/$(json_field "$tmp/asset.json" id)")"
+[ "$code" = 200 ] || die "the uploaded image does not come back (http $code).
+       The release was created: $created"
+cmp -s "$tmp/served.dmg" "$dmg" || die "the image GitHub serves is not the image that was built.
+       The release was created: $created"
+
+checked="served by the API, byte for byte"
+# A public repository also has the plain link, with no credentials at all —
+# the one a reader clicks.
+code="$(api -o "$tmp/repo.json" -w '%{http_code}' "https://api.github.com/repos/$slug")"
+if [ "$code" = 200 ] && [ "$(json_field "$tmp/repo.json" private)" = False ]; then
+	code="$(curl -sIL -o /dev/null -w '%{http_code}' "$url")"
+	[ "$code" = 200 ] || die "the image does not download anonymously (http $code).
+       The release was created: $created"
+	checked="downloads anonymously, byte for byte"
+fi
 
 echo
 echo "Done.  Desk $version"
-echo "  release: $(json_field "$tmp/created.json" html_url)"
-echo "  image:   $asset, $uploaded bytes, downloads as http 200"
+echo "  release: $created"
+echo "  image:   $asset, $uploaded bytes, $checked"
 echo "  app:     /Applications/Desk.app, built from $built"
