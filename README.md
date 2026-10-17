@@ -1,0 +1,170 @@
+# desk — Android desktop mode over scrcpy
+
+A small CLI that gives a phone **without** a built-in desktop mode a real desktop
+experience on your computer: a virtual display, a launcher, an all-apps drawer,
+and apps running as resizable freeform windows.
+
+Built and verified against a **Motorola Edge 70 (Android 17)** over USB from macOS,
+using scrcpy's `--new-display` feature.
+
+```
+desk start            # create the virtual display + launcher
+desk drawer           # open the all-apps drawer
+desk open chrome --freeform
+```
+
+---
+
+## Desk.app — the desktop app
+
+There is a native macOS app that wraps all of this in one control surface: a
+frameless glass bar with the navigation buttons that the virtual display lacks,
+an app drawer hanging under it, and scrcpy's window docked below so the whole
+thing reads as one desktop.
+
+![Desk: the glass bar with the app drawer over the phone's desktop](desk-gui/docs/glass.png)
+
+```sh
+cd desk-gui
+./build.sh              # Desk.app and Desk.dmg, with adb and scrcpy inside
+./build.sh --install    # ... and copy it into /Applications
+```
+
+It needs nothing else installed: `adb` and `scrcpy` ship inside the bundle. See
+[desk-gui/README.md](desk-gui/README.md) for using it, and the `desk` CLI below
+for scripting the same thing.
+
+---
+
+## Why this approach
+
+If you came here looking to trigger Motorola **Ready For / Smart Connect** desktop
+mode externally, these three routes are dead ends (all verified on-device):
+
+| Route | Why it fails |
+| --- | --- |
+| Smart Connect PC app on macOS | Motorola ships a Windows-only client. |
+| Cast the phone to the Mac (Miracast / Wi-Fi Display) | macOS has **no Wi-Fi Direct** support — AirServer's docs: *"Mac computers from Apple do not have the hardware or drivers required to use Wi-Fi Direct."* Apple only implements AirPlay, so a Mac can never be a Miracast sink. |
+| Start Moto's desktop on a scrcpy virtual display | `DesktopModeLauncherActivity` requires `com.motorola.permission.ACCESS_DESKTOP` (`signature\|privileged`), and the engine's desktop components (`DesktopActivityAlias`, `MainActivity`, `MobileDesktopTile`) are disabled by Motorola in a way `pm enable` refuses for non-debuggable apps. |
+
+What **does** work is putting a launcher on a scrcpy virtual display. Modern
+Motorola devices ship a secondary-display launcher that the system starts
+automatically, plus a full app drawer. Combine that with Android's freeform
+window mode and you get a desktop.
+
+---
+
+## Requirements
+
+- `python3` (macOS ships one)
+- `adb` and `scrcpy` — the tool finds them automatically in this order:
+  1. `$DESK_SCRCPY_DIR`
+  2. `./bin`
+  3. `~/Downloads/scrcpy-*`
+  4. `PATH`
+- USB debugging enabled, device authorised
+- Android 10+ with `android.software.freeform_window_management`
+  (`desk doctor` checks this)
+
+Run **`desk doctor`** first — it validates every prerequisite above.
+
+---
+
+## Commands
+
+### Session
+
+| Command | Does |
+| --- | --- |
+| `desk start` | Create the virtual display and wait for the launcher. |
+| `desk stop` | Destroy the virtual display. |
+| `desk status` | Session state, display ids, top activity. |
+| `desk info` | Display ids plus raw escape-hatch commands. |
+| `desk doctor` | Check tools, device, and desktop prerequisites. |
+
+`desk start` options: `--size 1920x1080`, `--dpi 220`, `--record out.mp4`,
+`--keep-content`, `--max-size N`, `--drawer`, `--no-decorations`,
+`--timeout SEC`, `--extra <scrcpy args>`.
+
+> `--no-decorations` also removes the launcher — the system stops starting it.
+
+### Apps
+
+| Command | Does |
+| --- | --- |
+| `desk drawer` | Open the all-apps drawer on the virtual display. |
+| `desk apps [QUERY]` | List installed apps (name + package). `--refresh` re-reads. |
+| `desk open QUERY` | Launch an app on the virtual display. |
+| `desk open QUERY --freeform` | Launch it as a resizable window. |
+| `desk home` | Go back to the launcher home screen. |
+
+`desk open` matches on package or (partial) app name. Ambiguous queries list the
+candidates and exit; add `--first` to take the first. `--bounds L,T,R,B` sizes a
+freeform window; `--wait` blocks until the launch completes.
+
+### Input and capture
+
+| Command | Does |
+| --- | --- |
+| `desk shot [file.png]` | Screenshot the virtual display. Defaults to `.desk/shots/`. |
+| `desk tap X Y` | Tap on the virtual display. |
+| `desk swipe X1 Y1 X2 Y2 [ms]` | Swipe / scroll. |
+| `desk key back\|home\|recents\|enter\|…` | Send a key. A raw keycode also works. |
+| `desk text "hello"` | Type text. |
+
+---
+
+## How it works
+
+1. `desk start` runs `scrcpy --new-display=WxH/DPI`, which creates a virtual
+   display owned by the scrcpy server (running as `shell`).
+2. The system sees a new display and starts the `SECONDARY_HOME` activity on it —
+   `com.motorola.launcher3/…SecondaryDisplayLauncher`. Nothing to do; it just
+   appears. On some phones the display starts empty instead, in which case run
+   `desk open <launcher>` or install a launcher.
+3. The tool reads the logical display id out of the scrcpy log
+   (`New display: … (id=N)`) and the **physical** display id from
+   `dumpsys SurfaceFlinger --display-id`. The physical id is needed because
+   `screencap -d` refuses logical ids for a display owned by another process
+   (`screencap` lives in `screenCapLib` and resolves ids against
+   `SurfaceComposerClient`). This is the trick that makes headless screenshots
+   of the virtual display possible.
+4. Apps launch with
+   `am start --display <logical> --windowingMode 5 -a MAIN -c LAUNCHER -p <pkg>`
+   (`WINDOWING_MODE_FREEFORM` is `5`; `am` parses this flag as an integer, so
+   `--windowingMode freeform` fails with a `NumberFormatException`).
+5. Input goes through `input -d <logical> tap|swipe|keyevent`.
+
+Runtime state lives in `.desk/` (`state.json`, `apps.json`, `scrcpy.log`, `shots/`).
+
+---
+
+## Known limitations
+
+- **No navigation bar.** The nav bar window *exists* on the virtual display
+  (`type=NAVIGATION_BAR`, 66 px) but renders nothing — Moto's secondary launcher
+  provides no nav buttons there. Use scrcpy's own shortcuts instead:
+  `MOD+b` / right-click = Back, `MOD+h` / middle-click = Home, `MOD+s` = Recents.
+- **The display is transient.** It dies when scrcpy exits. `--keep-content`
+  moves running apps back to the phone instead of killing them.
+- **Stale app list.** `desk apps` caches to `.desk/apps.json` for 24 h; use
+  `--refresh` after installing something.
+- **No multi-monitor or snapping.** Freeform windows are placed by the system;
+  `--bounds` gives partial control.
+
+`tools/bmpview.py` renders a strip of a screenshot as ASCII — useful for
+inspecting what the virtual display is actually drawing.
+
+---
+
+## Quick reference
+
+```bash
+desk doctor                                  # verify setup
+desk start --size 1920x1080 --dpi 220        # go
+desk drawer                                  # all apps
+desk open "chrome" --freeform                # floating window
+desk shot ~/Desktop/desk.png                 # grab a frame
+desk key back                                # or use right-click in scrcpy
+desk stop                                    # done
+```

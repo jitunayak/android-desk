@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# The CLI's working files: the scrcpy log, the cached app list, the state and
+# the screenshots it takes all live here.
+.desk/
+
+# The built app, the scrcpy release build.sh copies in, and disk images:
+# build.sh writes them all again.
+desk-gui/build/
+desk-gui/resources/darwin/bin/
+*.dmg
+
+# `go build` with no -o writes the module's name into its own directory.
+desk-gui/desk
+
+# Python
+__pycache__/
+*.pyc

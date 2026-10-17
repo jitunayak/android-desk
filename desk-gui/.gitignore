@@ -1,0 +1,6 @@
+# The built app, and the scrcpy release build.sh copies in: neither belongs
+# in source, and build.sh writes both again.
+build/
+resources/darwin/bin/
+# `go build` with no -o writes the module's name here.
+/desk

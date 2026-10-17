@@ -1,0 +1,712 @@
+#!/usr/bin/env python3
+"""
+desk - a desktop-mode environment for Android phones that have no desktop mode.
+
+It uses scrcpy's virtual-display feature to create a second display, puts a
+launcher (and a full app drawer) on it, and launches apps onto it as real
+resizable/freeform windows -- all rendered inside the scrcpy window on your
+computer.
+
+Requires: python3, plus adb and scrcpy (either on PATH or in ../bin or a
+scrcpy release folder, see `desk doctor`).
+"""
+
+import argparse
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+STATE_DIR = os.path.join(HERE, ".desk")
+STATE_FILE = os.path.join(STATE_DIR, "state.json")
+APPS_FILE = os.path.join(STATE_DIR, "apps.json")
+SHOTS_DIR = os.path.join(STATE_DIR, "shots")
+LOG_FILE = os.path.join(STATE_DIR, "scrcpy.log")
+
+# Motorola secondary-display components (present on most modern Moto devices).
+MOTO_LAUNCHER = ("com.motorola.launcher3",
+                 "com.android.launcher3.secondarydisplay.SecondaryDisplayLauncher")
+MOTO_DRAWER = ("com.motorola.launcher3",
+               "com.android.launcher3.secondarydisplay.SecondaryDisplayAppDrawer2")
+MOTO_DRAWER_ACTION = "com.motorola.launcher3.secondarydisplay.action.SECONDARY_DISPLAY_APP_DRAWER2"
+MOTO_DRAWER2_ACTION = "com.motorola.launcher3.secondarydisplay.action.SECONDARY_DISPLAY_APP_DRAWER2"
+
+KEYCODES = {
+    "back": 4, "home": 3, "recents": 187, "appswitch": 187, "menu": 82,
+    "enter": 66, "escape": 111, "delete": 67, "tab": 61, "space": 62,
+    "up": 19, "down": 20, "left": 21, "right": 22,
+    "power": 26, "wakeup": 224, "sleep": 223,
+    "volume_up": 24, "volume_down": 25, "volume_mute": 164,
+    "notifications": 83, "search": 84, "settings": 176,
+    "page_up": 92, "page_down": 93, "move_home": 122, "move_end": 123,
+}
+
+WINDOWING_FREEFORM = 5
+
+
+# --------------------------------------------------------------------------
+# small helpers
+# --------------------------------------------------------------------------
+
+def die(msg, code=1):
+    sys.stderr.write("desk: error: %s\n" % msg)
+    sys.exit(code)
+
+
+def info(msg):
+    sys.stderr.write("desk: %s\n" % msg)
+
+
+def ensure_dirs():
+    for d in (STATE_DIR, SHOTS_DIR):
+        os.makedirs(d, exist_ok=True)
+
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_state(state):
+    ensure_dirs()
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, STATE_FILE)
+
+
+# --------------------------------------------------------------------------
+# tool discovery
+# --------------------------------------------------------------------------
+
+def _scrcpy_candidates():
+    env = os.environ.get("DESK_SCRCPY_DIR")
+    if env:
+        yield env
+    yield os.path.join(HERE, "bin")
+    yield os.path.join(os.path.dirname(HERE), "bin")
+    for pat in ("~/Downloads/scrcpy-macos-*",
+                "~/Downloads/scrcpy-linux-*",
+                "~/Downloads/scrcpy-win*",
+                "~/scrcpy*",
+                "/opt/scrcpy"):
+        for d in sorted(glob.glob(os.path.expanduser(pat)), reverse=True):
+            if os.path.isdir(d):
+                yield d
+
+
+def find_tools():
+    """Return (adb_path, scrcpy_path). Raises SystemExit with guidance."""
+    adb = scrcpy = None
+    for d in _scrcpy_candidates():
+        if not adb and os.path.isfile(os.path.join(d, "adb")):
+            adb = os.path.join(d, "adb")
+        if not scrcpy and os.path.isfile(os.path.join(d, "scrcpy")):
+            scrcpy = os.path.join(d, "scrcpy")
+        if adb and scrcpy:
+            break
+    adb = adb or shutil.which("adb")
+    scrcpy = scrcpy or shutil.which("scrcpy")
+    if not adb or not scrcpy:
+        missing = ", ".join(n for n, v in (("adb", adb), ("scrcpy", scrcpy)) if not v)
+        die("could not find: %s\n"
+            "  Install scrcpy (it bundles adb), or set DESK_SCRCPY_DIR to the folder\n"
+            "  containing the scrcpy and adb executables." % missing)
+    return adb, scrcpy
+
+
+def adb_run(args, binary=False, check=True):
+    adb, _ = find_tools()
+    cmd = [adb] + list(args)
+    if binary:
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if check and p.returncode != 0:
+            die("adb failed: %s" % p.stderr.decode(errors="replace").strip())
+        return p.stdout
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if check and p.returncode != 0:
+        die("adb failed: %s" % (p.stdout or "").strip())
+    return p.stdout
+
+
+def sh(args, binary=False, check=True):
+    adb, _ = find_tools()
+    cmd = [adb, "shell"] + list(args)
+    p = subprocess.run(cmd, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE if binary else subprocess.STDOUT,
+                       text=not binary)
+    if binary:
+        if check and p.returncode != 0:
+            die("adb shell failed: %s" % p.stderr.decode(errors="replace").strip())
+        return p.stdout
+    if check and p.returncode != 0:
+        die("adb shell failed: %s" % (p.stdout or "").strip())
+    return p.stdout
+
+
+def device_serial():
+    """Return the first connected device serial, or None."""
+    out = adb_run(["devices"])
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "device":
+            return parts[0]
+    return None
+
+
+def require_device():
+    s = device_serial()
+    if not s:
+        die("no Android device connected.\n"
+            "  Connect by USB (enable USB debugging), or connect wirelessly:\n"
+            "    adb tcpip 5555 && adb connect <phone-ip>:5555")
+    return s
+
+
+# --------------------------------------------------------------------------
+# display discovery
+# --------------------------------------------------------------------------
+
+def read_scrcpy_display_id():
+    """Logical display id of the scrcpy virtual display, from the scrcpy log."""
+    if not os.path.exists(LOG_FILE):
+        return None
+    with open(LOG_FILE, errors="replace") as f:
+        text = f.read()
+    ids = re.findall(r"New display:.*?\(id=(\d+)\)", text)
+    return int(ids[-1]) if ids else None
+
+
+def read_physical_display_id():
+    """Physical display id of the scrcpy virtual display (needed by screencap)."""
+    try:
+        out = sh(["dumpsys", "SurfaceFlinger", "--display-id"])
+    except SystemExit:
+        return None
+    for line in out.splitlines():
+        if "scrcpy" in line.lower():
+            m = re.search(r"Display\s+(\d+)", line)
+            if m:
+                return m.group(1)
+    return None
+
+
+def session_alive(state):
+    pid = state.get("pid")
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    # the virtual display must still exist too
+    return read_physical_display_id() is not None
+
+
+def current_display(state):
+    """(logical_id, physical_id) for the running session, or die with guidance."""
+    if not session_alive(state):
+        die("no running session. Start one with:  desk start")
+    logical = read_scrcpy_display_id()
+    if logical is None:
+        die("could not determine the virtual display id (log: %s)" % LOG_FILE)
+    physical = read_physical_display_id()
+    if physical is None:
+        die("the scrcpy virtual display is gone. Restart with:  desk start")
+    return logical, physical
+
+
+def top_activity(display_id):
+    out = sh(["dumpsys", "activity", "activities"], check=False)
+    blocks = re.split(r"(?=^\s*Display #)", out, flags=re.M)
+    for b in blocks:
+        if re.match(r"^\s*Display #%d\b" % display_id, b):
+            m = re.search(r"topResumedActivity=ActivityRecord\{\S+ \S+ (\S+)", b)
+            if m:
+                return m.group(1)
+    return None
+
+
+# --------------------------------------------------------------------------
+# commands
+# --------------------------------------------------------------------------
+
+def cmd_start(args):
+    require_device()
+    ensure_dirs()
+    state = load_state()
+    if session_alive(state):
+        info("a session is already running (display %s). Use `desk stop` first."
+             % state.get("display_id"))
+        return
+
+    _, scrcpy = find_tools()
+
+    new_display = args.size
+    if args.dpi:
+        new_display = "%s/%s" % (args.size, args.dpi)
+
+    cmd = [scrcpy, "--new-display=%s" % new_display]
+    if args.keep_content:
+        cmd.append("--no-vd-destroy-content")
+    if args.no_decorations:
+        cmd.append("--no-vd-system-decorations")
+    if args.record:
+        cmd.append("--record=%s" % args.record)
+    if args.max_size:
+        cmd.append("--max-size=%d" % args.max_size)
+    if args.window_title:
+        cmd.append("--window-title=%s" % args.window_title)
+    if args.window_x is not None:
+        cmd.append("--window-x=%d" % args.window_x)
+    if args.window_y is not None:
+        cmd.append("--window-y=%d" % args.window_y)
+    if args.window_width:
+        cmd.append("--window-width=%d" % args.window_width)
+    if args.window_height:
+        cmd.append("--window-height=%d" % args.window_height)
+    if args.always_on_top:
+        cmd.append("--always-on-top")
+    if args.borderless:
+        cmd.append("--window-borderless")
+    if args.extra:
+        cmd.append("--")
+        cmd.extend(args.extra)
+
+    with open(LOG_FILE, "w") as log:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=log,
+                                stdin=subprocess.DEVNULL,
+                                start_new_session=True)
+
+    info("starting scrcpy (%s) ..." % new_display)
+    deadline = time.time() + args.timeout
+    logical = None
+    while time.time() < deadline:
+        logical = read_scrcpy_display_id()
+        if logical is not None:
+            break
+        if proc.poll() is not None:
+            die("scrcpy exited immediately. Log:\n%s" % tail_log())
+        time.sleep(0.4)
+
+    if logical is None:
+        proc.terminate()
+        die("timed out waiting for the virtual display. Log:\n%s" % tail_log())
+
+    state = {"pid": proc.pid, "display_id": logical, "size": args.size,
+             "dpi": args.dpi, "started": time.time(),
+             "scrcpy": scrcpy, "log": LOG_FILE}
+    save_state(state)
+    info("virtual display %d created" % logical)
+
+    # The system normally starts the secondary launcher by itself; wait for it.
+    if not args.no_decorations:
+        info("waiting for the launcher ...")
+        end = time.time() + 20
+        while time.time() < end:
+            top = top_activity(logical)
+            if top and ("secondarydisplay" in top or "DashBoard" in top):
+                info("launcher is up: %s" % top)
+                break
+            time.sleep(1)
+
+    if args.drawer:
+        cmd_drawer(args)
+
+    info("ready.  Screenshot:  desk shot     All apps:  desk drawer")
+
+
+def tail_log(n=40):
+    try:
+        with open(LOG_FILE, errors="replace") as f:
+            return "".join(f.readlines()[-n:])
+    except OSError:
+        return "(no log)"
+
+
+def cmd_stop(args):
+    state = load_state()
+    pid = state.get("pid")
+    if not pid:
+        info("no session recorded.")
+        return
+    try:
+        os.kill(pid, 15)
+        info("stopped session (pid %d)" % pid)
+    except OSError:
+        info("session was not running.")
+    save_state({})
+
+
+def cmd_status(args):
+    state = load_state()
+    serial = device_serial()
+    has_session = bool(state.get("pid"))
+    alive = has_session and session_alive(state)
+    logical = read_scrcpy_display_id() if has_session else None
+    physical = read_physical_display_id() if alive else None
+    top = top_activity(logical) if (alive and logical) else None
+    model = sh(["getprop", "ro.product.model"], check=False).strip() if serial else ""
+
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "device": serial, "model": model,
+            "running": alive, "pid": state.get("pid"),
+            "display_id": logical, "physical_id": physical,
+            "size": state.get("size"), "dpi": state.get("dpi"),
+            "top_activity": top, "log": state.get("log"),
+        }))
+        return
+
+    print("device      : %s" % (serial or "(none connected)"))
+    if not has_session:
+        print("session     : stopped")
+        return
+    print("session     : %s (pid %s)" % ("running" if alive else "dead", state["pid"]))
+    print("geometry    : %s dpi=%s" % (state.get("size"), state.get("dpi")))
+    if alive:
+        print("display id  : %s (logical)" % logical)
+        print("physical id : %s" % physical)
+        print("top activity: %s" % (top or "?"))
+    print("log         : %s" % state.get("log"))
+
+
+def cmd_info(args):
+    logical, physical = current_display(load_state())
+    print("logical  display id : %d" % logical)
+    print("physical display id : %s" % physical)
+    print("top activity        : %s" % (top_activity(logical) or "?"))
+    print()
+    print("raw escape hatches:")
+    print("  adb shell am start --display %d -n <pkg>/<activity>" % logical)
+    print("  adb exec-out screencap -p -d %s" % physical)
+    print("  adb shell input -d %d tap X Y" % logical)
+
+
+def cmd_drawer(args):
+    logical, _ = current_display(load_state())
+    out = sh(["am", "start", "--display", str(logical), "-a", MOTO_DRAWER_ACTION],
+             check=False)
+    if "Error" in out or "Exception" in out or "not found" in out.lower():
+        out = sh(["am", "start", "--display", str(logical),
+                  "-n", "%s/%s" % MOTO_DRAWER], check=False)
+    if "Error" in out or "Exception" in out:
+        die("could not open the app drawer on display %d:\n%s" % (logical, out.strip()))
+    info("app drawer opened on display %d" % logical)
+
+
+def cmd_home(args):
+    logical, _ = current_display(load_state())
+    out = sh(["am", "start", "--display", str(logical), "-n", "%s/%s" % MOTO_LAUNCHER],
+             check=False)
+    if "Error" in out or "Exception" in out:
+        # fall back to a HOME key press on that display
+        sh(["input", "-d", str(logical), "keyevent", str(KEYCODES["home"])], check=False)
+        info("sent HOME to display %d" % logical)
+    else:
+        info("launcher resumed on display %d" % logical)
+
+
+def fetch_apps(force=False, max_age=86400):
+    if not force and os.path.exists(APPS_FILE):
+        try:
+            with open(APPS_FILE) as f:
+                data = json.load(f)
+            if time.time() - data.get("fetched", 0) < max_age:
+                return data["apps"]
+        except Exception:
+            pass
+
+    _, scrcpy = find_tools()
+    info("reading installed apps (this takes a few seconds) ...")
+    p = subprocess.run([scrcpy, "--list-apps"], stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, text=True)
+    apps = []
+    for line in p.stdout.splitlines():
+        m = re.match(r"^\s*\*\s+(.+?)\s{2,}([A-Za-z0-9_.]+)\s*$", line)
+        if not m:
+            continue
+        name, pkg = m.group(1).strip(), m.group(2).strip()
+        if pkg and "." in pkg:
+            apps.append({"name": name, "package": pkg})
+    if not apps:
+        die("could not read the app list. scrcpy output:\n%s" % p.stdout)
+    ensure_dirs()
+    with open(APPS_FILE, "w") as f:
+        json.dump({"fetched": time.time(), "apps": apps}, f, indent=2)
+    return apps
+
+
+def match_apps(apps, query):
+    q = query.lower()
+    exact = [a for a in apps if a["package"].lower() == q or a["name"].lower() == q]
+    if exact:
+        return [exact[0]]
+    return [a for a in apps
+            if q in a["name"].lower() or q in a["package"].lower()]
+
+
+def cmd_apps(args):
+    apps = fetch_apps(force=args.refresh)
+    shown = match_apps(apps, args.query) if args.query else apps
+    if not shown:
+        die("no app matches %r" % args.query, 2)
+    shown = sorted(shown, key=lambda a: a["name"].lower())
+    if getattr(args, "json", False):
+        print(json.dumps([{"name": a["name"], "package": a["package"]} for a in shown]))
+        return
+    for a in shown:
+        print("%-38s %s" % (a["name"], a["package"]))
+    info("%d app(s)" % len(shown))
+
+
+def cmd_open(args):
+    apps = fetch_apps()
+    matches = match_apps(apps, args.query)
+    if not matches:
+        die("no app matches %r (try: desk apps %s)" % (args.query, args.query), 2)
+    if len(matches) > 1 and not args.first:
+        info("%d matches for %r:" % (len(matches), args.query))
+        for a in matches[:25]:
+            info("   %-34s %s" % (a["name"], a["package"]))
+        die("be more specific, or pass --first", 2)
+    app = matches[0]
+
+    logical, _ = current_display(load_state())
+    cmd = ["am", "start", "--display", str(logical)]
+    if args.freeform:
+        cmd += ["--windowingMode", str(WINDOWING_FREEFORM)]
+    if args.bounds:
+        cmd += ["--bounds", args.bounds]
+    if args.wait:
+        cmd.append("-W")
+    cmd += ["-a", "android.intent.action.MAIN",
+            "-c", "android.intent.category.LAUNCHER",
+            "-p", app["package"]]
+
+    out = sh(cmd, check=False)
+    if "Exception" in out or "Error:" in out:
+        # fall back to the explicit component
+        comp = sh(["cmd", "package", "resolve-activity", "--brief",
+                   "-a", "android.intent.action.MAIN",
+                   "-c", "android.intent.category.LAUNCHER",
+                   "-p", app["package"]], check=False).strip().splitlines()
+        comp = comp[-1] if comp else ""
+        if "/" in comp:
+            cmd = ["am", "start", "--display", str(logical)]
+            if args.freeform:
+                cmd += ["--windowingMode", str(WINDOWING_FREEFORM)]
+            if args.bounds:
+                cmd += ["--bounds", args.bounds]
+            cmd += ["-n", comp]
+            out = sh(cmd, check=False)
+    if "Exception" in out or "Error:" in out:
+        die("failed to launch %s:\n%s" % (app["package"], out.strip()))
+    info("launched %s on display %d%s"
+         % (app["name"], logical, " (freeform)" if args.freeform else ""))
+
+
+def cmd_shot(args):
+    _, physical = current_display(load_state())
+    ensure_dirs()
+    out = args.file
+    if not out:
+        out = os.path.join(SHOTS_DIR, "shot-%s.png" % time.strftime("%Y%m%d-%H%M%S"))
+    with open(out, "wb") as f:
+        p = subprocess.run([find_tools()[0], "exec-out", "screencap", "-p", "-d", physical],
+                           stdout=f, stderr=subprocess.PIPE)
+    if p.returncode != 0 or os.path.getsize(out) < 1000:
+        die("screenshot failed (%s)" % p.stderr.decode(errors="replace").strip())
+    print(os.path.abspath(out))
+
+
+def _require_int(s, what):
+    try:
+        return int(s)
+    except ValueError:
+        die("%s must be a number, got %r" % (what, s))
+
+
+def cmd_tap(args):
+    logical, _ = current_display(load_state())
+    sh(["input", "-d", str(logical), "tap",
+        str(_require_int(args.x, "x")), str(_require_int(args.y, "y"))])
+
+
+def cmd_swipe(args):
+    logical, _ = current_display(load_state())
+    sh(["input", "-d", str(logical), "swipe",
+        str(_require_int(args.x1, "x1")), str(_require_int(args.y1, "y1")),
+        str(_require_int(args.x2, "x2")), str(_require_int(args.y2, "y2")),
+        str(_require_int(args.ms, "duration"))])
+
+
+def cmd_key(args):
+    logical, _ = current_display(load_state())
+    name = args.key.lower()
+    code = KEYCODES.get(name)
+    if code is None:
+        code = _require_int(name, "key")
+    sh(["input", "-d", str(logical), "keyevent", str(code)])
+    info("sent %s to display %d" % (args.key, logical))
+
+
+def cmd_text(args):
+    logical, _ = current_display(load_state())
+    sh(["input", "-d", str(logical), "text", args.text])
+
+
+def cmd_doctor(args):
+    ok = True
+    print("== tools ==")
+    try:
+        adb, scrcpy = find_tools()
+        print("  adb    : %s" % adb)
+        print("  scrcpy : %s" % scrcpy)
+    except SystemExit:
+        return
+    print("\n== device ==")
+    serial = device_serial()
+    if not serial:
+        print("  no device connected")
+        return
+    print("  serial : %s" % serial)
+    print("  model  : %s" % sh(["getprop", "ro.product.model"]).strip())
+    print("  android: %s (sdk %s)" % (sh(["getprop", "ro.build.version.release"]).strip(),
+                                      sh(["getprop", "ro.build.version.sdk"]).strip()))
+    print("\n== desktop-mode prerequisites ==")
+    freeform = sh(["settings", "get", "global", "enable_freeform_support"], check=False).strip()
+    print("  enable_freeform_support      : %s %s"
+          % (freeform or "(unset)", "OK" if freeform == "1" else "<-- should be 1"))
+    nav = sh(["settings", "get", "secure", "navigation_mode"], check=False).strip()
+    print("  navigation_mode              : %s" % (nav or "(default)"))
+    feats = sh(["pm", "list", "features"], check=False)
+    for f in ("android.software.freeform_window_management",
+              "android.software.activities_on_secondary_displays"):
+        print("  %-45s: %s" % (f.replace("android.software.", ""),
+                               "yes" if f in feats else "NO"))
+    print("\n== launcher components ==")
+    for label, (pkg, cls) in (("secondary launcher", MOTO_LAUNCHER),
+                              ("app drawer", MOTO_DRAWER)):
+        comp = "%s/%s" % (pkg, cls)
+        dump = sh(["dumpsys", "package", pkg], check=False)
+        present = cls in dump
+        print("  %-20s: %s  %s" % (label, "found" if present else "MISSING", comp))
+        ok = ok and present
+    print("\n%s" % ("all good." if ok else "some prerequisites are missing."))
+
+
+# --------------------------------------------------------------------------
+# cli
+# --------------------------------------------------------------------------
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="desk", description="Desktop mode for Android phones over scrcpy.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  desk start                     create the virtual display and launcher
+  desk drawer                    open the all-apps drawer
+  desk apps gmail                search installed apps
+  desk open chrome               launch an app full screen on the display
+  desk open settings --freeform  launch it as a resizable window
+  desk shot                      screenshot the virtual display
+  desk tap 500 300               tap on the display
+  desk key back                  back (or: home, recents)
+  desk stop                      destroy the virtual display
+""")
+    sub = p.add_subparsers(dest="command")
+
+    s = sub.add_parser("start", help="start scrcpy with a virtual display")
+    s.add_argument("--size", default="1920x1080", help="default 1920x1080")
+    s.add_argument("--dpi", default="220", help="default 220")
+    s.add_argument("--record", help="also record the display to this .mp4")
+    s.add_argument("--max-size", type=int, help="scrcpy --max-size")
+    s.add_argument("--window-title", help="scrcpy window title")
+    s.add_argument("--window-x", type=int, help="scrcpy window position")
+    s.add_argument("--window-y", type=int, help="scrcpy window position")
+    s.add_argument("--window-width", type=int, help="scrcpy window width")
+    s.add_argument("--window-height", type=int, help="scrcpy window height")
+    s.add_argument("--always-on-top", action="store_true")
+    s.add_argument("--borderless", action="store_true")
+    s.add_argument("--keep-content", action="store_true",
+                   help="keep apps alive when the display closes")
+    s.add_argument("--no-decorations", action="store_true",
+                   help="disable system decorations (this also removes the launcher)")
+    s.add_argument("--drawer", action="store_true", help="open the app drawer once ready")
+    s.add_argument("--timeout", type=float, default=30)
+    s.add_argument("--extra", nargs=argparse.REMAINDER, help="extra scrcpy args")
+    s.set_defaults(func=cmd_start)
+
+    sub.add_parser("stop", help="stop the session").set_defaults(func=cmd_stop)
+    s = sub.add_parser("status", help="show session status")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_status)
+    sub.add_parser("info", help="show display ids and raw commands").set_defaults(func=cmd_info)
+    sub.add_parser("drawer", help="open the all-apps drawer").set_defaults(func=cmd_drawer)
+    sub.add_parser("home", help="go to the launcher home screen").set_defaults(func=cmd_home)
+    sub.add_parser("doctor", help="check prerequisites").set_defaults(func=cmd_doctor)
+
+    s = sub.add_parser("apps", help="list installed apps")
+    s.add_argument("query", nargs="?", default=None)
+    s.add_argument("--refresh", action="store_true", help="re-read the app list")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_apps)
+
+    s = sub.add_parser("open", help="launch an app on the virtual display")
+    s.add_argument("query", help="app name or package (substring is fine)")
+    s.add_argument("--freeform", action="store_true", help="open as a resizable window")
+    s.add_argument("--bounds", help="freeform bounds L,T,R,B (needs --freeform)")
+    s.add_argument("--wait", action="store_true", help="wait for launch to complete")
+    s.add_argument("--first", action="store_true", help="pick the first match")
+    s.set_defaults(func=cmd_open)
+
+    s = sub.add_parser("shot", help="screenshot the virtual display")
+    s.add_argument("file", nargs="?", default=None)
+    s.set_defaults(func=cmd_shot)
+
+    s = sub.add_parser("tap", help="tap at x y on the virtual display")
+    s.add_argument("x"); s.add_argument("y")
+    s.set_defaults(func=cmd_tap)
+
+    s = sub.add_parser("swipe", help="swipe on the virtual display")
+    s.add_argument("x1"); s.add_argument("y1"); s.add_argument("x2"); s.add_argument("y2")
+    s.add_argument("ms", nargs="?", default="300")
+    s.set_defaults(func=cmd_swipe)
+
+    s = sub.add_parser("key", help="send a key (back/home/recents/enter/...)")
+    s.add_argument("key")
+    s.set_defaults(func=cmd_key)
+
+    s = sub.add_parser("text", help="type text on the virtual display")
+    s.add_argument("text")
+    s.set_defaults(func=cmd_text)
+
+    return p
+
+
+def main():
+    ensure_dirs()
+    parser = build_parser()
+    args = parser.parse_args()
+    if not getattr(args, "command", None):
+        parser.print_help()
+        return
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
