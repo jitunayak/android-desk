@@ -95,8 +95,13 @@ code="$(api -o "$tmp/me.json" -w '%{http_code}' https://api.github.com/user)"
 [ "$code" = 200 ] || die "GitHub refused the stored credential (http $code)."
 echo "    publishing as $(json_field "$tmp/me.json" login)"
 
-# Where things stand: the tag, and whether it is released already.
-tag_remote="$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)"
+# Where things stand: the tag, and whether it is released already. A tag may be
+# annotated, in which case ls-remote advertises it twice — once as the tag
+# object and once, with ^{}, as the commit it wraps. Ask for the commit.
+tag_remote="$(git ls-remote --tags origin "refs/tags/$tag^{}" | cut -f1)"
+if [ -z "$tag_remote" ]; then
+	tag_remote="$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1)"
+fi
 if [ -n "$tag_remote" ] && [ "$tag_remote" != "$head" ]; then
 	die "$tag already exists, on $tag_remote, and this is $head.
        A released version is published once: bump \"version\" in
